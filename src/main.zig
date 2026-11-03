@@ -102,22 +102,22 @@ fn readBounded(reader: *std.Io.File.Reader, buffer: []u8, comptime too_large: an
 }
 
 fn parseBytecode(bytes: []const u8) !Bytecode {
-    if (bytes.len < 12) return error.TruncatedHeader;
+    if (bytes.len < bytecode_header_size) return error.TruncatedHeader;
     const string_size = readI32(bytes, 0);
     const globals_count = readI32(bytes, 4);
     const public_count = readI32(bytes, 8);
     if (string_size < 0 or globals_count < 0 or public_count < 0) return error.NegativeHeaderField;
 
     const count: usize = @intCast(public_count);
-    if (count > (bytes.len - 12) / 9) return error.TruncatedPublicTable;
-    const string_start = 12 + count * 9;
+    if (count > (bytes.len - bytecode_header_size) / public_symbol_size) return error.TruncatedPublicTable;
+    const string_start = bytecode_header_size + count * public_symbol_size;
     const size: usize = @intCast(string_size);
     if (size > bytes.len - string_start) return error.TruncatedStringTable;
     const strings = bytes[string_start..][0..size];
-    const publics = bytes[12..string_start];
+    const publics = bytes[bytecode_header_size..string_start];
 
     for (0..count) |index| {
-        const symbol = publics[index * 9 ..][0..9];
+        const symbol = publics[index * public_symbol_size ..][0..public_symbol_size];
         _ = try stringAt(strings, readI32(symbol, 0));
         const value = readI32(symbol, 4);
         if (value < 0) return error.NegativePublicSymbolOffset;
@@ -342,7 +342,8 @@ fn formatInstruction(alloc: std.mem.Allocator, instruction: Instruction) ![]cons
     return buffer.toOwnedSlice();
 }
 
-fn count_frequencies(alloc: std.mem.Allocator, instructions: []const Instruction, can_start_pair: []const u8) !std.ArrayList(Frequency) {
+fn count_frequencies(alloc: std.mem.Allocator, instructions: []const Instruction, can_start_pair: []const u8, up_to: usize) !std.ArrayList(Frequency) {
+    assert(up_to > 0);
     var freqs: std.StringHashMap(usize) = .init(alloc);
     errdefer freqs.deinit();
 
@@ -353,17 +354,24 @@ fn count_frequencies(alloc: std.mem.Allocator, instructions: []const Instruction
         }
         entry.value_ptr.* += 1;
     }
-    for (0..instructions.len) |idx| {
-        if (can_start_pair[idx] == 1) {
-            assert(idx + 1 < instructions.len);
-            const first = try formatInstruction(alloc, instructions[idx]);
-            const second = try formatInstruction(alloc, instructions[idx + 1]);
-            const combined = try std.mem.concat(alloc, u8, &.{ first, "; ", second });
-            const entry = try freqs.getOrPut(combined);
-            if (!entry.found_existing) {
-                entry.value_ptr.* = 0;
+    for (2..up_to + 1) |batch_count| {
+        for (0..instructions.len) |start| {
+            if (can_start_pair[start] == 1 and start + batch_count <= instructions.len) {
+                if (!std.mem.allEqual(u8, can_start_pair[start .. start + batch_count - 1], 1)) {
+                    continue;
+                }
+                var text: std.ArrayList(u8) = .empty;
+                for (start..start + batch_count) |idx| {
+                    try text.appendSlice(alloc, try formatInstruction(alloc, instructions[idx]));
+                    if (idx != start + batch_count - 1) try text.appendSlice(alloc, "; ");
+                }
+                const combined = try text.toOwnedSlice(alloc);
+                const entry = try freqs.getOrPut(combined);
+                if (!entry.found_existing) {
+                    entry.value_ptr.* = 0;
+                }
+                entry.value_ptr.* += 1;
             }
-            entry.value_ptr.* += 1;
         }
     }
     var result: std.ArrayList(Frequency) = try .initCapacity(alloc, 0);
@@ -439,12 +447,13 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     const filename = args.next() orelse {
-        std.debug.print("Usage: lama_vm <file.bc>\n", .{});
+        std.debug.print("Usage: ./zig-out/bin/vm3 <file.bc> [n]\n", .{});
         return error.InvalidCommandLineArguments;
     };
-    if (args.next() != null) {
-        std.debug.print("Usage: lama_vm <file.bc>\n", .{});
-        return error.InvalidCommandLineArguments;
+    var up_to: usize = 2;
+    if (args.next()) |up| {
+        up_to = try std.fmt.parseInt(usize, up, 10);
+        assert(up_to >= 1);
     }
     const file = try std.Io.Dir.cwd().openFile(init.io, filename, .{});
     defer file.close(init.io);
@@ -453,7 +462,12 @@ pub fn main(init: std.process.Init) !void {
     const bytecode = try parseBytecode(bytes);
     const instructions = try decode(init.arena.allocator(), bytecode);
     const can_start_pair = try analyze(init.arena.allocator(), instructions, bytecode.publics);
-    const freqs = try count_frequencies(init.arena.allocator(), instructions, can_start_pair);
+    const freqs = try count_frequencies(
+        init.arena.allocator(),
+        instructions,
+        can_start_pair,
+        up_to,
+    );
     std.mem.sort(Frequency, freqs.items, {}, Frequency.lessThan);
     std.mem.reverse(Frequency, freqs.items);
     for (freqs.items) |entry| {

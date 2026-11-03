@@ -2,7 +2,16 @@
 
 ```zig
 zig build -Doptimize=ReleaseFast
+```
+
+```
 ./zig-out/bin/vm3 Sort.bc 
+```
+
+
+Можно запустить чтобы максимальная длина была до $n$ ($1 \leq n$) 
+```
+./zig-out/bin/vm3 Sort.bc 3
 ```
 
 **Результат**
