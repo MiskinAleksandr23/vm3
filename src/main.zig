@@ -342,7 +342,7 @@ fn formatInstruction(alloc: std.mem.Allocator, instruction: Instruction) ![]cons
     return buffer.toOwnedSlice();
 }
 
-fn count_frequencies(alloc: std.mem.Allocator, instructions: []const Instruction, can_start_pair: []const u8, up_to: usize) !std.ArrayList(Frequency) {
+fn countFrequencies(alloc: std.mem.Allocator, instructions: []const Instruction, can_start_pair: []const u8, up_to: usize) !std.ArrayList(Frequency) {
     assert(up_to > 0);
     var freqs: std.StringHashMap(usize) = .init(alloc);
     errdefer freqs.deinit();
@@ -462,7 +462,7 @@ pub fn main(init: std.process.Init) !void {
     const bytecode = try parseBytecode(bytes);
     const instructions = try decode(init.arena.allocator(), bytecode);
     const can_start_pair = try analyze(init.arena.allocator(), instructions, bytecode.publics);
-    const freqs = try count_frequencies(
+    const freqs = try countFrequencies(
         init.arena.allocator(),
         instructions,
         can_start_pair,
