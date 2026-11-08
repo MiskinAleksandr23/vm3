@@ -125,8 +125,7 @@ fn stringAt(strings: []const u8, offset: i32) ![]const u8 {
     return tail[0..end];
 }
 
-fn decodeInstruction(bytecode: Bytecode, offset: usize) !Instruction {
-    const code = bytecode.code;
+fn readInstruction(code: []const u8, offset: usize) !Instruction {
     if (offset >= code.len) return error.TruncatedInstruction;
     const opcode: Op = @fromBackingInt(code[offset]);
     const size: usize = switch (opcode) {
@@ -201,6 +200,19 @@ fn decodeInstruction(bytecode: Bytecode, offset: usize) !Instruction {
     return .{ .bytes = code[offset..][0..size] };
 }
 
+fn decodeInstruction(bytecode: Bytecode, offset: usize) !Instruction {
+    const instruction = try readInstruction(bytecode.code, offset);
+    try instruction.validate(bytecode);
+    return instruction;
+}
+
+const FlowInfo = struct {
+    continues: bool = true,
+    target: ?i32 = null,
+    returns_after: bool = false,
+    countable: bool = true,
+};
+
 const Instruction = struct {
     const Self = @This();
 
@@ -211,6 +223,35 @@ const Instruction = struct {
     }
     pub fn operand(self: *const Self, index: usize) i32 {
         return std.mem.readInt(i32, self.bytes[1 + 4 * index ..][0..4], .little);
+    }
+
+    fn flowInfo(self: *const Self) FlowInfo {
+        return switch (self.opcode()) {
+            .Jump => .{ .continues = false, .target = self.operand(0) },
+            .JumpZero, .JumpNonZero, .Closure => .{ .target = self.operand(0) },
+            .Call => .{ .target = self.operand(0), .returns_after = true },
+            .CallClosure => .{ .returns_after = true },
+            .End => .{ .continues = false },
+            .Terminator => .{ .continues = false, .countable = false },
+            else => .{},
+        };
+    }
+
+    fn validate(self: *const Self, bytecode: Bytecode) !void {
+        switch (self.opcode()) {
+            .String, .Sexp, .Tag => _ = try stringAt(bytecode.strings, self.operand(0)),
+            .Closure => {
+                var descriptor: usize = 9;
+                while (descriptor < self.bytes.len) : (descriptor += 5) {
+                    if (self.bytes[descriptor] > 3) return error.InvalidCaptureScope;
+                }
+            },
+            else => {},
+        }
+        if (self.flowInfo().target) |target| {
+            if (target < 0) return error.IncorrectOffset;
+            if (target >= bytecode.code.len) return error.IncorrectOffset;
+        }
     }
 };
 
@@ -245,7 +286,8 @@ const Frequency = struct {
     }
 };
 
-fn formatInstruction(writer: *std.Io.Writer, instruction: Instruction) !void {
+fn formatInstruction(writer: *std.Io.Writer, bytecode: Bytecode, instruction_offset: usize) !usize {
+    const instruction = try decodeInstruction(bytecode, instruction_offset);
     const opcode = instruction.opcode();
     const opcode_byte = @backingInt(opcode);
     const binary = [_][]const u8{ "ADD", "SUB", "MUL", "DIV", "MOD", "LT", "LE", "GT", "GE", "EQ", "NE", "AND", "OR" };
@@ -318,15 +360,10 @@ fn formatInstruction(writer: *std.Io.Writer, instruction: Instruction) !void {
         Op.Length => try writer.writeAll("LENGTH"),
         Op.ToString => try writer.writeAll("TO_STRING"),
         Op.Array => try writer.print("MAKE_ARRAY {d}", .{instruction.operand(0)}),
+        Op.Terminator => try writer.writeAll("STOP"),
         else => unreachable,
     }
-}
-
-fn stopsIdiom(opcode: Op) bool {
-    return switch (opcode) {
-        .Jump, .End, .Call, .CallClosure, .Terminator => true,
-        else => false,
-    };
+    return instruction.bytes.len;
 }
 
 const Reachable = struct {
@@ -374,26 +411,12 @@ fn analyze(alloc: std.mem.Allocator, bytecode: Bytecode) !Reachable {
             if (reachable.starts.isSet(offset)) break;
             const instruction = try decodeInstruction(bytecode, offset);
             reachable.starts.set(offset);
-            switch (instruction.opcode()) {
-                .String, .Sexp, .Tag => _ = try stringAt(bytecode.strings, instruction.operand(0)),
-                .Closure => {
-                    var descriptor: usize = 9;
-                    while (descriptor < instruction.bytes.len) : (descriptor += 5) {
-                        if (instruction.bytes[descriptor] > 3) return error.InvalidCaptureScope;
-                    }
-                },
-                else => {},
+            const flow = instruction.flowInfo();
+            if (flow.target) |target| {
+                try reachable.addTarget(alloc, &pending, target);
             }
-            switch (instruction.opcode()) {
-                .Jump, .JumpZero, .JumpNonZero, .Call, .Closure => {
-                    try reachable.addTarget(alloc, &pending, instruction.operand(0));
-                },
-                else => {},
-            }
-            switch (instruction.opcode()) {
-                .Jump, .End, .Terminator => break,
-                else => offset += instruction.bytes.len,
-            }
+            if (!flow.continues) break;
+            offset += instruction.bytes.len;
         }
     }
 
@@ -401,7 +424,7 @@ fn analyze(alloc: std.mem.Allocator, bytecode: Bytecode) !Reachable {
     var end: usize = 0;
     while (it.next()) |offset| {
         if (offset < end) return error.IncorrectOffset;
-        end = offset + (try decodeInstruction(bytecode, offset)).bytes.len;
+        end = offset + (try readInstruction(bytecode.code, offset)).bytes.len;
     }
     return reachable;
 }
@@ -423,22 +446,23 @@ fn countFrequencies(alloc: std.mem.Allocator, bytecode: Bytecode, reachable: Rea
             .{ .code = bytecode.code },
         );
         defer freqs.deinit();
-        
+
         var it = reachable.starts.iterator(.{});
         while (it.next()) |start| {
             var end = start;
             for (0..length_index + 1) |index| {
                 if (end >= bytecode.code.len or !reachable.starts.isSet(end)) break;
                 if (index != 0 and reachable.block_starts.isSet(end)) break;
-                const instruction = try decodeInstruction(bytecode, end);
-                if (instruction.opcode() == .Terminator) break;
+                const instruction = try readInstruction(bytecode.code, end);
+                const flow = instruction.flowInfo();
+                if (!flow.countable) break;
                 end += instruction.bytes.len;
                 if (index == length_index) {
                     const entry = try freqs.getOrPut(.{ .offset = @intCast(start), .len = @intCast(end - start) });
                     if (!entry.found_existing) entry.value_ptr.* = 0;
                     entry.value_ptr.* += 1;
                 }
-                if (stopsIdiom(instruction.opcode())) break;
+                if (!flow.continues or flow.returns_after) break;
             }
         }
         if (freqs.count() == 0) break;
@@ -490,10 +514,8 @@ pub fn main(init: std.process.Init) !void {
         var offset: usize = entry.idiom.offset;
         const end = offset + entry.idiom.len;
         while (offset < end) {
-            const instruction = try decodeInstruction(bytecode, offset);
             if (offset != entry.idiom.offset) try text.writer.writeAll("; ");
-            try formatInstruction(&text.writer, instruction);
-            offset += instruction.bytes.len;
+            offset += try formatInstruction(&text.writer, bytecode, offset);
         }
         std.debug.print("{s: <50} {d: >5} times\n", .{ text.written(), entry.count });
     }
