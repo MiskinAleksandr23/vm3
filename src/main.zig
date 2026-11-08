@@ -3,10 +3,8 @@ const Io = std.Io;
 
 const assert = std.debug.assert;
 
-const buffer_size: usize = 64 * 1024 * 1024;
 const bytecode_header_size = 3 * @sizeOf(i32);
 const public_symbol_size = 2 * @sizeOf(i32) + @sizeOf(u8);
-var file_buffer: [buffer_size]u8 = undefined;
 
 fn readI32(data: []const u8, offset: usize) i32 {
     return std.mem.readInt(i32, data[offset..][0..4], .little);
@@ -91,16 +89,6 @@ const Op = enum(u8) {
     _,
 };
 
-fn readBounded(reader: *std.Io.File.Reader, buffer: []u8, comptime too_large: anyerror) ![]const u8 {
-    const size = reader.interface.readSliceShort(buffer) catch return reader.err.?;
-    if (size == buffer.len) {
-        var extra: [1]u8 = undefined;
-        const remaining = reader.interface.readSliceShort(&extra) catch return reader.err.?;
-        if (remaining != 0) return too_large;
-    }
-    return buffer[0..size];
-}
-
 fn parseBytecode(bytes: []const u8) !Bytecode {
     if (bytes.len < bytecode_header_size) return error.TruncatedHeader;
     const string_size = readI32(bytes, 0);
@@ -137,108 +125,85 @@ fn stringAt(strings: []const u8, offset: i32) ![]const u8 {
     return tail[0..end];
 }
 
-fn decode(alloc: std.mem.Allocator, bytecode: Bytecode) ![]Instruction {
+fn decodeInstruction(bytecode: Bytecode, offset: usize) !Instruction {
     const code = bytecode.code;
-    var instructions: std.ArrayList(Instruction) = .empty;
-    var offset: usize = 0;
-    while (offset < code.len) {
-        const opcode: Op = @fromBackingInt(code[offset]);
-        if (opcode == Op.Terminator) {
-            if (offset != code.len - 1) return error.TrailingBytesAfterTerminator;
-            return instructions.toOwnedSlice(alloc);
-        }
-
-        const size: usize = switch (opcode) {
-            Op.Add,
-            Op.Sub,
-            Op.Mul,
-            Op.Div,
-            Op.Rem,
-            Op.Less,
-            Op.LessEqual,
-            Op.Greater,
-            Op.GreaterEqual,
-            Op.Equal,
-            Op.NotEqual,
-            Op.And,
-            Op.Or,
-            Op.StoreIndirect,
-            Op.StoreElement,
-            Op.End,
-            Op.Ret,
-            Op.Drop,
-            Op.Dup,
-            Op.Swap,
-            Op.Elem,
-            Op.StringEqual,
-            Op.IsString,
-            Op.IsArray,
-            Op.IsSexp,
-            Op.IsBoxed,
-            Op.IsUnboxed,
-            Op.IsClosure,
-            Op.Read,
-            Op.Write,
-            Op.Length,
-            Op.ToString,
-            => 1,
-            Op.Const,
-            Op.String,
-            Op.Jump,
-            Op.LoadGlobal,
-            Op.LoadLocal,
-            Op.LoadArg,
-            Op.LoadClosure,
-            Op.LoadAddressGlobal,
-            Op.LoadAddressLocal,
-            Op.LoadAddressArg,
-            Op.LoadAddressClosure,
-            Op.StoreGlobal,
-            Op.StoreLocal,
-            Op.StoreArg,
-            Op.StoreClosure,
-            Op.JumpZero,
-            Op.JumpNonZero,
-            Op.CallClosure,
-            Op.ArrayPattern,
-            Op.Line,
-            Op.Array,
-            => 5,
-            Op.Sexp, Op.Begin, Op.CBegin, Op.Call, Op.Tag, Op.Fail => 9,
-            Op.Closure => blk: {
-                if (code.len - offset < 9) return error.TruncatedInstruction;
-                const count = readI32(code, offset + 5);
-                if (count < 0) return error.NegativeCaptureCount;
-                const captures: usize = @intCast(count);
-                if (captures > (code.len - offset - 9) / 5) return error.TruncatedInstruction;
-                break :blk 9 + captures * 5;
-            },
-            else => {
-                return error.InvalidOpcode;
-            },
-        };
-        if (size > code.len - offset) return error.TruncatedInstruction;
-        const instruction = Instruction{ .offset = offset, .bytes = code[offset..][0..size] };
-        switch (opcode) {
-            Op.String, Op.Sexp, Op.Tag => _ = try stringAt(bytecode.strings, instruction.operand(0)),
-            Op.Closure => {
-                var descriptor: usize = 9;
-                while (descriptor < size) : (descriptor += 5) {
-                    if (instruction.bytes[descriptor] > 3) return error.InvalidCaptureScope;
-                }
-            },
-            else => {},
-        }
-        try instructions.append(alloc, instruction);
-        offset += size;
-    }
-    return error.MissingTerminator;
+    if (offset >= code.len) return error.TruncatedInstruction;
+    const opcode: Op = @fromBackingInt(code[offset]);
+    const size: usize = switch (opcode) {
+        Op.Add,
+        Op.Sub,
+        Op.Mul,
+        Op.Div,
+        Op.Rem,
+        Op.Less,
+        Op.LessEqual,
+        Op.Greater,
+        Op.GreaterEqual,
+        Op.Equal,
+        Op.NotEqual,
+        Op.And,
+        Op.Or,
+        Op.StoreIndirect,
+        Op.StoreElement,
+        Op.End,
+        Op.Ret,
+        Op.Drop,
+        Op.Dup,
+        Op.Swap,
+        Op.Elem,
+        Op.StringEqual,
+        Op.IsString,
+        Op.IsArray,
+        Op.IsSexp,
+        Op.IsBoxed,
+        Op.IsUnboxed,
+        Op.IsClosure,
+        Op.Read,
+        Op.Write,
+        Op.Length,
+        Op.ToString,
+        Op.Terminator,
+        => 1,
+        Op.Const,
+        Op.String,
+        Op.Jump,
+        Op.LoadGlobal,
+        Op.LoadLocal,
+        Op.LoadArg,
+        Op.LoadClosure,
+        Op.LoadAddressGlobal,
+        Op.LoadAddressLocal,
+        Op.LoadAddressArg,
+        Op.LoadAddressClosure,
+        Op.StoreGlobal,
+        Op.StoreLocal,
+        Op.StoreArg,
+        Op.StoreClosure,
+        Op.JumpZero,
+        Op.JumpNonZero,
+        Op.CallClosure,
+        Op.ArrayPattern,
+        Op.Line,
+        Op.Array,
+        => 5,
+        Op.Sexp, Op.Begin, Op.CBegin, Op.Call, Op.Tag, Op.Fail => 9,
+        Op.Closure => blk: {
+            if (code.len - offset < 9) return error.TruncatedInstruction;
+            const count = readI32(code, offset + 5);
+            if (count < 0) return error.NegativeCaptureCount;
+            const captures: usize = @intCast(count);
+            if (captures > (code.len - offset - 9) / 5) return error.TruncatedInstruction;
+            break :blk 9 + captures * 5;
+        },
+        else => return error.InvalidOpcode,
+    };
+    if (size > code.len - offset) return error.TruncatedInstruction;
+    return .{ .bytes = code[offset..][0..size] };
 }
 
 const Instruction = struct {
     const Self = @This();
 
-    offset: usize,
     bytes: []const u8,
 
     pub fn opcode(self: *const Self) Op {
@@ -249,22 +214,38 @@ const Instruction = struct {
     }
 };
 
-const Frequency = struct {
-    const Self = @This();
+const Idiom = struct {
+    offset: u32,
+    len: u32,
 
-    text: []const u8,
-    count: usize,
-
-    pub fn lessThan(_: void, lhs: Self, rhs: Self) bool {
-        if (lhs.count != rhs.count) return lhs.count < rhs.count;
-        return std.mem.order(u8, lhs.text, rhs.text) == .lt;
+    fn bytes(self: Idiom, code: []const u8) []const u8 {
+        return code[self.offset..][0..self.len];
     }
 };
 
-fn formatInstruction(alloc: std.mem.Allocator, instruction: Instruction) ![]const u8 {
-    var buffer: std.Io.Writer.Allocating = .init(alloc);
-    defer buffer.deinit();
-    const writer = &buffer.writer;
+const IdiomCtx = struct {
+    code: []const u8,
+
+    pub fn hash(self: IdiomCtx, idiom: Idiom) u64 {
+        return std.hash.Wyhash.hash(0, idiom.bytes(self.code));
+    }
+
+    pub fn eql(self: IdiomCtx, lhs: Idiom, rhs: Idiom) bool {
+        return std.mem.eql(u8, lhs.bytes(self.code), rhs.bytes(self.code));
+    }
+};
+
+const Frequency = struct {
+    idiom: Idiom,
+    count: u32,
+
+    pub fn lessThan(code: []const u8, lhs: Frequency, rhs: Frequency) bool {
+        if (lhs.count != rhs.count) return lhs.count > rhs.count;
+        return std.mem.order(u8, lhs.idiom.bytes(code), rhs.idiom.bytes(code)) == .lt;
+    }
+};
+
+fn formatInstruction(writer: *std.Io.Writer, instruction: Instruction) !void {
     const opcode = instruction.opcode();
     const opcode_byte = @backingInt(opcode);
     const binary = [_][]const u8{ "ADD", "SUB", "MUL", "DIV", "MOD", "LT", "LE", "GT", "GE", "EQ", "NE", "AND", "OR" };
@@ -339,108 +320,135 @@ fn formatInstruction(alloc: std.mem.Allocator, instruction: Instruction) ![]cons
         Op.Array => try writer.print("MAKE_ARRAY {d}", .{instruction.operand(0)}),
         else => unreachable,
     }
-    return buffer.toOwnedSlice();
 }
 
-fn countFrequencies(alloc: std.mem.Allocator, instructions: []const Instruction, can_start_pair: []const u8, up_to: usize) !std.ArrayList(Frequency) {
-    assert(up_to > 0);
-    var freqs: std.StringHashMap(usize) = .init(alloc);
-    errdefer freqs.deinit();
+fn stopsIdiom(opcode: Op) bool {
+    return switch (opcode) {
+        .Jump, .End, .Call, .CallClosure, .Terminator => true,
+        else => false,
+    };
+}
 
-    for (instructions) |instr| {
-        const entry = try freqs.getOrPut(try formatInstruction(alloc, instr));
-        if (!entry.found_existing) {
-            entry.value_ptr.* = 0;
-        }
-        entry.value_ptr.* += 1;
+const Reachable = struct {
+    starts: std.bit_set.Dynamic,
+    block_starts: std.bit_set.Dynamic,
+
+    fn deinit(self: *Reachable, alloc: std.mem.Allocator) void {
+        self.starts.deinit(alloc);
+        self.block_starts.deinit(alloc);
     }
-    for (2..up_to + 1) |batch_count| {
-        for (0..instructions.len) |start| {
-            if (can_start_pair[start] == 1 and start + batch_count <= instructions.len) {
-                if (!std.mem.allEqual(u8, can_start_pair[start .. start + batch_count - 1], 1)) {
-                    continue;
-                }
-                var text: std.ArrayList(u8) = .empty;
-                for (start..start + batch_count) |idx| {
-                    try text.appendSlice(alloc, try formatInstruction(alloc, instructions[idx]));
-                    if (idx != start + batch_count - 1) try text.appendSlice(alloc, "; ");
-                }
-                const combined = try text.toOwnedSlice(alloc);
-                const entry = try freqs.getOrPut(combined);
-                if (!entry.found_existing) {
-                    entry.value_ptr.* = 0;
-                }
-                entry.value_ptr.* += 1;
+
+    fn addTarget(self: *Reachable, alloc: std.mem.Allocator, pending: *std.ArrayList(u32), target: i32) !void {
+        if (target < 0) return error.IncorrectOffset;
+        if (target >= self.starts.bit_length) return error.IncorrectOffset;
+
+        const offset: u32 = @intCast(target);
+        if (self.block_starts.isSet(offset)) {
+            return;
+        }
+        self.block_starts.set(offset);
+        if (!self.starts.isSet(offset)) {
+            try pending.append(alloc, offset);
+        }
+    }
+};
+
+fn analyze(alloc: std.mem.Allocator, bytecode: Bytecode) !Reachable {
+    var starts = try std.bit_set.Dynamic.initEmpty(alloc, bytecode.code.len);
+    errdefer starts.deinit(alloc);
+    var block_starts = try std.bit_set.Dynamic.initEmpty(alloc, bytecode.code.len);
+    errdefer block_starts.deinit(alloc);
+    var reachable = Reachable{ .starts = starts, .block_starts = block_starts };
+    var pending: std.ArrayList(u32) = .empty;
+    defer pending.deinit(alloc);
+
+    const pbs = bytecode.publics.len / public_symbol_size;
+    for (0..pbs) |index| {
+        const symbol = bytecode.publics[index * public_symbol_size ..][0..public_symbol_size];
+        if (symbol[8] == 0) try reachable.addTarget(alloc, &pending, readI32(symbol, 4));
+    }
+    while (pending.pop()) |root| {
+        var offset: usize = root;
+        while (true) {
+            if (offset >= bytecode.code.len) return error.TruncatedInstruction;
+            if (reachable.starts.isSet(offset)) break;
+            const instruction = try decodeInstruction(bytecode, offset);
+            reachable.starts.set(offset);
+            switch (instruction.opcode()) {
+                .String, .Sexp, .Tag => _ = try stringAt(bytecode.strings, instruction.operand(0)),
+                .Closure => {
+                    var descriptor: usize = 9;
+                    while (descriptor < instruction.bytes.len) : (descriptor += 5) {
+                        if (instruction.bytes[descriptor] > 3) return error.InvalidCaptureScope;
+                    }
+                },
+                else => {},
+            }
+            switch (instruction.opcode()) {
+                .Jump, .JumpZero, .JumpNonZero, .Call, .Closure => {
+                    try reachable.addTarget(alloc, &pending, instruction.operand(0));
+                },
+                else => {},
+            }
+            switch (instruction.opcode()) {
+                .Jump, .End, .Terminator => break,
+                else => offset += instruction.bytes.len,
             }
         }
     }
-    var result: std.ArrayList(Frequency) = try .initCapacity(alloc, 0);
-    var it = freqs.iterator();
-    while (it.next()) |entry| {
-        const bytes = entry.key_ptr.*;
-        const count = entry.value_ptr.*;
-        try result.append(alloc, Frequency{ .text = bytes, .count = count });
+
+    var it = reachable.starts.iterator(.{});
+    var end: usize = 0;
+    while (it.next()) |offset| {
+        if (offset < end) return error.IncorrectOffset;
+        end = offset + (try decodeInstruction(bytecode, offset)).bytes.len;
+    }
+    return reachable;
+}
+
+fn countFrequencies(alloc: std.mem.Allocator, bytecode: Bytecode, reachable: Reachable, up_to: usize) !std.ArrayList(Frequency) {
+    assert(up_to > 0);
+    var result: std.ArrayList(Frequency) = .empty;
+    errdefer result.deinit(alloc);
+    const max_length = @min(up_to, reachable.starts.count());
+
+    for (0..max_length) |length_index| {
+        var freqs = std.HashMap(
+            Idiom,
+            u32,
+            IdiomCtx,
+            std.hash_map.default_max_load_percentage,
+        ).initContext(
+            alloc,
+            .{ .code = bytecode.code },
+        );
+        defer freqs.deinit();
+        
+        var it = reachable.starts.iterator(.{});
+        while (it.next()) |start| {
+            var end = start;
+            for (0..length_index + 1) |index| {
+                if (end >= bytecode.code.len or !reachable.starts.isSet(end)) break;
+                if (index != 0 and reachable.block_starts.isSet(end)) break;
+                const instruction = try decodeInstruction(bytecode, end);
+                if (instruction.opcode() == .Terminator) break;
+                end += instruction.bytes.len;
+                if (index == length_index) {
+                    const entry = try freqs.getOrPut(.{ .offset = @intCast(start), .len = @intCast(end - start) });
+                    if (!entry.found_existing) entry.value_ptr.* = 0;
+                    entry.value_ptr.* += 1;
+                }
+                if (stopsIdiom(instruction.opcode())) break;
+            }
+        }
+        if (freqs.count() == 0) break;
+        try result.ensureTotalCapacityPrecise(alloc, result.items.len + freqs.count());
+        var entries = freqs.iterator();
+        while (entries.next()) |entry| {
+            result.appendAssumeCapacity(.{ .idiom = entry.key_ptr.*, .count = entry.value_ptr.* });
+        }
     }
     return result;
-}
-
-fn analyze(alloc: std.mem.Allocator, instructions: []const Instruction, publics: []const u8) ![]u8 {
-    assert(publics.len % public_symbol_size == 0);
-
-    var instruction_starts: std.AutoHashMap(usize, usize) = .init(alloc);
-    errdefer instruction_starts.deinit();
-
-    var index: usize = 0;
-    for (instructions) |instr| {
-        try instruction_starts.put(instr.offset, index);
-        index += 1;
-    }
-
-    const instr_count = instructions.len;
-    const can_start_pair = try alloc.alloc(u8, instr_count);
-    errdefer alloc.free(can_start_pair);
-    @memset(can_start_pair, 1);
-
-    for (0..publics.len / public_symbol_size) |idx| {
-        const symbol = publics[idx * public_symbol_size ..][0..public_symbol_size];
-        if (symbol[public_symbol_size - 1] == 0) {
-            const offset: usize = @intCast(readI32(symbol, @sizeOf(i32)));
-            if (instruction_starts.get(offset)) |to| {
-                if (to != 0) {
-                    can_start_pair[to - 1] = 0;
-                }
-            } else {
-                return error.IncorrectOffset;
-            }
-        }
-    }
-    if (instr_count == 0) {
-        return &.{};
-    }
-
-    for (0..instr_count) |idx| {
-        switch (instructions[idx].opcode()) {
-            .Jump, .JumpZero, .JumpNonZero, .Call, .Closure => {
-                const to: usize = @intCast(instructions[idx].operand(0));
-                if (instruction_starts.get(to)) |jmp_to| {
-                    if (jmp_to != 0) {
-                        can_start_pair[jmp_to - 1] = 0;
-                    }
-                } else {
-                    return error.IncorrectOffset;
-                }
-                if (instructions[idx].opcode() == .Call) {
-                    can_start_pair[idx] = 0;
-                }
-            },
-            .CallClosure => {
-                can_start_pair[idx] = 0;
-            },
-            else => continue,
-        }
-    }
-    can_start_pair[instr_count - 1] = 0;
-    return can_start_pair;
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -457,20 +465,36 @@ pub fn main(init: std.process.Init) !void {
     }
     const file = try std.Io.Dir.cwd().openFile(init.io, filename, .{});
     defer file.close(init.io);
+    const alloc = init.gpa;
+    const stat = try file.stat(init.io);
+    if (stat.size > std.math.maxInt(u32)) return error.BytecodeFileTooLarge;
+    const bytes = try alloc.alloc(u8, @intCast(stat.size));
+    defer alloc.free(bytes);
     var reader = file.readerStreaming(init.io, &.{});
-    const bytes = try readBounded(&reader, &file_buffer, error.BytecodeFileTooLarge);
+    var read_offset: usize = 0;
+    while (read_offset < bytes.len) {
+        const end = @min(read_offset + 16 * 1024 * 1024, bytes.len);
+        try reader.interface.readSliceAll(bytes[read_offset..end]);
+        read_offset = end;
+    }
     const bytecode = try parseBytecode(bytes);
-    const instructions = try decode(init.arena.allocator(), bytecode);
-    const can_start_pair = try analyze(init.arena.allocator(), instructions, bytecode.publics);
-    const freqs = try countFrequencies(
-        init.arena.allocator(),
-        instructions,
-        can_start_pair,
-        up_to,
-    );
-    std.mem.sort(Frequency, freqs.items, {}, Frequency.lessThan);
-    std.mem.reverse(Frequency, freqs.items);
+    var reachable = try analyze(alloc, bytecode);
+    defer reachable.deinit(alloc);
+    var freqs = try countFrequencies(alloc, bytecode, reachable, up_to);
+    defer freqs.deinit(alloc);
+    std.mem.sort(Frequency, freqs.items, bytecode.code, Frequency.lessThan);
+    var text: std.Io.Writer.Allocating = .init(alloc);
+    defer text.deinit();
     for (freqs.items) |entry| {
-        std.debug.print("{s: <50} {d: >5} times\n", .{ entry.text, entry.count });
+        text.clearRetainingCapacity();
+        var offset: usize = entry.idiom.offset;
+        const end = offset + entry.idiom.len;
+        while (offset < end) {
+            const instruction = try decodeInstruction(bytecode, offset);
+            if (offset != entry.idiom.offset) try text.writer.writeAll("; ");
+            try formatInstruction(&text.writer, instruction);
+            offset += instruction.bytes.len;
+        }
+        std.debug.print("{s: <50} {d: >5} times\n", .{ text.written(), entry.count });
     }
 }
