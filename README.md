@@ -32,9 +32,8 @@ ELEM; DROP                                             7 times
 LD ARG 0                                               7 times
 END                                                    5 times
 SEXP 0 2                                               4 times
-JMP L762                                               4 times
 DUP; DUP                                               4 times
-JMP L350                                               3 times
+JMP L762                                               3 times
 DUP; ARRAY 2                                           3 times
 ELEM; ST LOCAL 0                                       3 times
 LD LOCAL 0                                             3 times
@@ -47,6 +46,7 @@ MAKE_ARRAY 2                                           3 times
 MAKE_ARRAY 2; JMP L762                                 3 times
 EQ                                                     2 times
 SEXP 0 2; MAKE_ARRAY 2                                 2 times
+JMP L350                                               2 times
 JMP L116                                               2 times
 DUP; TAG 0 2                                           2 times
 ELEM; CONST 0                                          2 times
@@ -156,9 +156,7 @@ ARRAY 2; CJMPNZ L280                                   1 times
 ARRAY 2; CJMPNZ L637                                   1 times
 ARRAY 2; CJMPNZ L197                                   1 times
 FAIL 7 17                                              1 times
-FAIL 7 17; JMP L762                                    1 times
 FAIL 14 9                                              1 times
-FAIL 14 9; JMP L350                                    1 times
 LINE 3                                                 1 times
 LINE 3; LD ARG 0                                       1 times
 LINE 5                                                 1 times

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Io = std.Io;
+const c = @import("lama_disassembler");
 
 const assert = std.debug.assert;
 
@@ -11,82 +11,10 @@ fn readI32(data: []const u8, offset: usize) i32 {
 }
 
 const Bytecode = struct {
-    strings: []const u8,
+    strings_size: usize,
+    terminated_strings_size: usize,
     publics: []const u8,
     code: []const u8,
-};
-
-const Op = enum(u8) {
-    Add = 0x01,
-    Sub = 0x02,
-    Mul = 0x03,
-    Div = 0x04,
-    Rem = 0x05,
-    Less = 0x06,
-    LessEqual = 0x07,
-    Greater = 0x08,
-    GreaterEqual = 0x09,
-    Equal = 0x0A,
-    NotEqual = 0x0B,
-    And = 0x0C,
-    Or = 0x0D,
-
-    Const = 0x10,
-    String = 0x11,
-    Sexp = 0x12,
-    StoreIndirect = 0x13,
-    StoreElement = 0x14,
-    Jump = 0x15,
-    End = 0x16,
-    Ret = 0x17,
-    Drop = 0x18,
-    Dup = 0x19,
-    Swap = 0x1A,
-    Elem = 0x1B,
-
-    LoadGlobal = 0x20,
-    LoadLocal = 0x21,
-    LoadArg = 0x22,
-    LoadClosure = 0x23,
-
-    LoadAddressGlobal = 0x30,
-    LoadAddressLocal = 0x31,
-    LoadAddressArg = 0x32,
-    LoadAddressClosure = 0x33,
-
-    StoreGlobal = 0x40,
-    StoreLocal = 0x41,
-    StoreArg = 0x42,
-    StoreClosure = 0x43,
-
-    JumpZero = 0x50,
-    JumpNonZero = 0x51,
-    Begin = 0x52,
-    CBegin = 0x53,
-    Closure = 0x54,
-    CallClosure = 0x55,
-    Call = 0x56,
-    Tag = 0x57,
-    ArrayPattern = 0x58,
-    Fail = 0x59,
-    Line = 0x5A,
-
-    StringEqual = 0x60,
-    IsString = 0x61,
-    IsArray = 0x62,
-    IsSexp = 0x63,
-    IsBoxed = 0x64,
-    IsUnboxed = 0x65,
-    IsClosure = 0x66,
-
-    Read = 0x70,
-    Write = 0x71,
-    Length = 0x72,
-    ToString = 0x73,
-    Array = 0x74,
-
-    Terminator = 0xFF,
-    _,
 };
 
 fn parseBytecode(bytes: []const u8) !Bytecode {
@@ -102,11 +30,14 @@ fn parseBytecode(bytes: []const u8) !Bytecode {
     const size: usize = @intCast(string_size);
     if (size > bytes.len - string_start) return error.TruncatedStringTable;
     const strings = bytes[string_start..][0..size];
+    const terminated_size = if (std.mem.findScalarLast(u8, strings, 0)) |last| last + 1 else 0;
     const publics = bytes[bytecode_header_size..string_start];
 
     for (0..count) |index| {
         const symbol = publics[index * public_symbol_size ..][0..public_symbol_size];
-        _ = try stringAt(strings, readI32(symbol, 0));
+        const name = readI32(symbol, 0);
+        if (name < 0 or name >= size) return error.StringOffsetOutOfBounds;
+        if (name >= terminated_size) return error.UnterminatedString;
         const value = readI32(symbol, 4);
         if (value < 0) return error.NegativePublicSymbolOffset;
         switch (symbol[8]) {
@@ -115,145 +46,43 @@ fn parseBytecode(bytes: []const u8) !Bytecode {
             else => return error.InvalidPublicSymbolType,
         }
     }
-    return .{ .strings = strings, .publics = publics, .code = bytes[string_start + size ..] };
-}
-
-fn stringAt(strings: []const u8, offset: i32) ![]const u8 {
-    if (offset < 0 or offset >= strings.len) return error.StringOffsetOutOfBounds;
-    const tail = strings[@intCast(offset)..];
-    const end = std.mem.findScalar(u8, tail, 0) orelse return error.UnterminatedString;
-    return tail[0..end];
-}
-
-fn readInstruction(code: []const u8, offset: usize) !Instruction {
-    if (offset >= code.len) return error.TruncatedInstruction;
-    const opcode: Op = @fromBackingInt(code[offset]);
-    const size: usize = switch (opcode) {
-        Op.Add,
-        Op.Sub,
-        Op.Mul,
-        Op.Div,
-        Op.Rem,
-        Op.Less,
-        Op.LessEqual,
-        Op.Greater,
-        Op.GreaterEqual,
-        Op.Equal,
-        Op.NotEqual,
-        Op.And,
-        Op.Or,
-        Op.StoreIndirect,
-        Op.StoreElement,
-        Op.End,
-        Op.Ret,
-        Op.Drop,
-        Op.Dup,
-        Op.Swap,
-        Op.Elem,
-        Op.StringEqual,
-        Op.IsString,
-        Op.IsArray,
-        Op.IsSexp,
-        Op.IsBoxed,
-        Op.IsUnboxed,
-        Op.IsClosure,
-        Op.Read,
-        Op.Write,
-        Op.Length,
-        Op.ToString,
-        Op.Terminator,
-        => 1,
-        Op.Const,
-        Op.String,
-        Op.Jump,
-        Op.LoadGlobal,
-        Op.LoadLocal,
-        Op.LoadArg,
-        Op.LoadClosure,
-        Op.LoadAddressGlobal,
-        Op.LoadAddressLocal,
-        Op.LoadAddressArg,
-        Op.LoadAddressClosure,
-        Op.StoreGlobal,
-        Op.StoreLocal,
-        Op.StoreArg,
-        Op.StoreClosure,
-        Op.JumpZero,
-        Op.JumpNonZero,
-        Op.CallClosure,
-        Op.ArrayPattern,
-        Op.Line,
-        Op.Array,
-        => 5,
-        Op.Sexp, Op.Begin, Op.CBegin, Op.Call, Op.Tag, Op.Fail => 9,
-        Op.Closure => blk: {
-            if (code.len - offset < 9) return error.TruncatedInstruction;
-            const count = readI32(code, offset + 5);
-            if (count < 0) return error.NegativeCaptureCount;
-            const captures: usize = @intCast(count);
-            if (captures > (code.len - offset - 9) / 5) return error.TruncatedInstruction;
-            break :blk 9 + captures * 5;
-        },
-        else => return error.InvalidOpcode,
+    return .{
+        .strings_size = size,
+        .terminated_strings_size = terminated_size,
+        .publics = publics,
+        .code = bytes[string_start + size ..],
     };
-    if (size > code.len - offset) return error.TruncatedInstruction;
-    return .{ .bytes = code[offset..][0..size] };
 }
 
-fn decodeInstruction(bytecode: Bytecode, offset: usize) !Instruction {
-    const instruction = try readInstruction(bytecode.code, offset);
-    try instruction.validate(bytecode);
-    return instruction;
+fn disassemblyContext(bytecode: Bytecode) c.LamaBytecode {
+    return .{
+        .code = bytecode.code.ptr,
+        .code_size = bytecode.code.len,
+        .strings_size = bytecode.strings_size,
+        .terminated_strings_size = bytecode.terminated_strings_size,
+    };
 }
 
-const FlowInfo = struct {
-    continues: bool = true,
-    target: ?i32 = null,
-    returns_after: bool = false,
-    countable: bool = true,
-};
-
-const Instruction = struct {
-    const Self = @This();
-
-    bytes: []const u8,
-
-    pub fn opcode(self: *const Self) Op {
-        return @fromBackingInt(@intCast(self.bytes[0]));
+fn disassembleInstruction(
+    bytecode: *const c.LamaBytecode,
+    offset: usize,
+    output: ?*c.FILE,
+    written: [*c]usize,
+) !c.LamaInstructionInfo {
+    var info: c.LamaInstructionInfo = undefined;
+    switch (c.lama_disassemble_instruction(output, bytecode, offset, &info, written)) {
+        c.LAMA_DISASM_OK => return info,
+        c.LAMA_DISASM_TRUNCATED_INSTRUCTION => return error.TruncatedInstruction,
+        c.LAMA_DISASM_INVALID_OPCODE => return error.InvalidOpcode,
+        c.LAMA_DISASM_STRING_OFFSET_OUT_OF_BOUNDS => return error.StringOffsetOutOfBounds,
+        c.LAMA_DISASM_UNTERMINATED_STRING => return error.UnterminatedString,
+        c.LAMA_DISASM_NEGATIVE_CAPTURE_COUNT => return error.NegativeCaptureCount,
+        c.LAMA_DISASM_INVALID_CAPTURE_SCOPE => return error.InvalidCaptureScope,
+        c.LAMA_DISASM_INCORRECT_OFFSET => return error.IncorrectOffset,
+        c.LAMA_DISASM_WRITE_FAILED => return error.WriteFailed,
+        else => unreachable,
     }
-    pub fn operand(self: *const Self, index: usize) i32 {
-        return std.mem.readInt(i32, self.bytes[1 + 4 * index ..][0..4], .little);
-    }
-
-    fn flowInfo(self: *const Self) FlowInfo {
-        return switch (self.opcode()) {
-            .Jump => .{ .continues = false, .target = self.operand(0) },
-            .JumpZero, .JumpNonZero, .Closure => .{ .target = self.operand(0) },
-            .Call => .{ .target = self.operand(0), .returns_after = true },
-            .CallClosure => .{ .returns_after = true },
-            .End => .{ .continues = false },
-            .Terminator => .{ .continues = false, .countable = false },
-            else => .{},
-        };
-    }
-
-    fn validate(self: *const Self, bytecode: Bytecode) !void {
-        switch (self.opcode()) {
-            .String, .Sexp, .Tag => _ = try stringAt(bytecode.strings, self.operand(0)),
-            .Closure => {
-                var descriptor: usize = 9;
-                while (descriptor < self.bytes.len) : (descriptor += 5) {
-                    if (self.bytes[descriptor] > 3) return error.InvalidCaptureScope;
-                }
-            },
-            else => {},
-        }
-        if (self.flowInfo().target) |target| {
-            if (target < 0) return error.IncorrectOffset;
-            if (target >= bytecode.code.len) return error.IncorrectOffset;
-        }
-    }
-};
+}
 
 const Idiom = struct {
     offset: u32,
@@ -286,86 +115,6 @@ const Frequency = struct {
     }
 };
 
-fn formatInstruction(writer: *std.Io.Writer, bytecode: Bytecode, instruction_offset: usize) !usize {
-    const instruction = try decodeInstruction(bytecode, instruction_offset);
-    const opcode = instruction.opcode();
-    const opcode_byte = @backingInt(opcode);
-    const binary = [_][]const u8{ "ADD", "SUB", "MUL", "DIV", "MOD", "LT", "LE", "GT", "GE", "EQ", "NE", "AND", "OR" };
-    const scopes = [_][]const u8{ "GLOBAL", "LOCAL", "ARG", "CLOSURE" };
-
-    switch (opcode) {
-        Op.Add,
-        Op.Sub,
-        Op.Mul,
-        Op.Div,
-        Op.Rem,
-        Op.Less,
-        Op.LessEqual,
-        Op.Greater,
-        Op.GreaterEqual,
-        Op.Equal,
-        Op.NotEqual,
-        Op.And,
-        Op.Or,
-        => try writer.writeAll(binary[opcode_byte - @backingInt(Op.Add)]),
-        Op.Const => try writer.print("CONST {d}", .{instruction.operand(0)}),
-        Op.String => try writer.print("STRING {d}", .{instruction.operand(0)}),
-        Op.Sexp => try writer.print("SEXP {d} {d}", .{ instruction.operand(0), instruction.operand(1) }),
-        Op.StoreIndirect => try writer.writeAll("STI"),
-        Op.StoreElement => try writer.writeAll("STA"),
-        Op.Jump => try writer.print("JMP L{d}", .{instruction.operand(0)}),
-        Op.End => try writer.writeAll("END"),
-        Op.Ret => try writer.writeAll("RET"),
-        Op.Drop => try writer.writeAll("DROP"),
-        Op.Dup => try writer.writeAll("DUP"),
-        Op.Swap => try writer.writeAll("SWAP"),
-        Op.Elem => try writer.writeAll("ELEM"),
-        Op.LoadGlobal,
-        Op.LoadLocal,
-        Op.LoadArg,
-        Op.LoadClosure,
-        Op.LoadAddressGlobal,
-        Op.LoadAddressLocal,
-        Op.LoadAddressArg,
-        Op.LoadAddressClosure,
-        Op.StoreGlobal,
-        Op.StoreLocal,
-        Op.StoreArg,
-        Op.StoreClosure,
-        => {
-            const names = [_][]const u8{ "LD", "LDA", "ST" };
-            try writer.print("{s} {s} {d}", .{ names[(opcode_byte - @backingInt(Op.LoadGlobal)) >> 4], scopes[opcode_byte & 3], instruction.operand(0) });
-        },
-        Op.JumpZero, Op.JumpNonZero => try writer.print("{s} L{d}", .{ if (opcode == Op.JumpZero) @as([]const u8, "CJMPZ") else "CJMPNZ", instruction.operand(0) }),
-        Op.Begin, Op.CBegin => try writer.print("{s} {d} {d}", .{ if (opcode == Op.Begin) @as([]const u8, "BEGIN") else "CBEGIN", instruction.operand(0), instruction.operand(1) }),
-        Op.Closure => {
-            try writer.print("CLOSURE L{d} {d}", .{ instruction.operand(0), instruction.operand(1) });
-            var offset: usize = 9;
-            while (offset < instruction.bytes.len) : (offset += 5) {
-                try writer.print(" {s} {d}", .{ scopes[instruction.bytes[offset]], readI32(instruction.bytes, offset + 1) });
-            }
-        },
-        Op.CallClosure => try writer.print("CALLC {d}", .{instruction.operand(0)}),
-        Op.Call => try writer.print("CALL L{d} {d}", .{ instruction.operand(0), instruction.operand(1) }),
-        Op.Tag => try writer.print("TAG {d} {d}", .{ instruction.operand(0), instruction.operand(1) }),
-        Op.ArrayPattern => try writer.print("ARRAY {d}", .{instruction.operand(0)}),
-        Op.Fail => try writer.print("FAIL {d} {d}", .{ instruction.operand(0), instruction.operand(1) }),
-        Op.Line => try writer.print("LINE {d}", .{instruction.operand(0)}),
-        Op.StringEqual, Op.IsString, Op.IsArray, Op.IsSexp, Op.IsBoxed, Op.IsUnboxed, Op.IsClosure => {
-            const patterns = [_][]const u8{ "STRCMP", "STRING", "ARRAY", "SEXP", "BOXED", "UNBOXED", "CLOSURE" };
-            try writer.print("PATT {s}", .{patterns[opcode_byte - @backingInt(Op.StringEqual)]});
-        },
-        Op.Read => try writer.writeAll("READ"),
-        Op.Write => try writer.writeAll("WRITE"),
-        Op.Length => try writer.writeAll("LENGTH"),
-        Op.ToString => try writer.writeAll("TO_STRING"),
-        Op.Array => try writer.print("MAKE_ARRAY {d}", .{instruction.operand(0)}),
-        Op.Terminator => try writer.writeAll("STOP"),
-        else => unreachable,
-    }
-    return instruction.bytes.len;
-}
-
 const Reachable = struct {
     starts: std.bit_set.Dynamic,
     block_starts: std.bit_set.Dynamic,
@@ -391,6 +140,7 @@ const Reachable = struct {
 };
 
 fn analyze(alloc: std.mem.Allocator, bytecode: Bytecode) !Reachable {
+    const decoder = disassemblyContext(bytecode);
     var starts = try std.bit_set.Dynamic.initEmpty(alloc, bytecode.code.len);
     errdefer starts.deinit(alloc);
     var block_starts = try std.bit_set.Dynamic.initEmpty(alloc, bytecode.code.len);
@@ -409,14 +159,13 @@ fn analyze(alloc: std.mem.Allocator, bytecode: Bytecode) !Reachable {
         while (true) {
             if (offset >= bytecode.code.len) return error.TruncatedInstruction;
             if (reachable.starts.isSet(offset)) break;
-            const instruction = try decodeInstruction(bytecode, offset);
+            const info = try disassembleInstruction(&decoder, offset, null, null);
             reachable.starts.set(offset);
-            const flow = instruction.flowInfo();
-            if (flow.target) |target| {
-                try reachable.addTarget(alloc, &pending, target);
+            if (info.target >= 0) {
+                try reachable.addTarget(alloc, &pending, info.target);
             }
-            if (!flow.continues) break;
-            offset += instruction.bytes.len;
+            if (!info.continues) break;
+            offset += info.size;
         }
     }
 
@@ -424,9 +173,44 @@ fn analyze(alloc: std.mem.Allocator, bytecode: Bytecode) !Reachable {
     var end: usize = 0;
     while (it.next()) |offset| {
         if (offset < end) return error.IncorrectOffset;
-        end = offset + (try readInstruction(bytecode.code, offset)).bytes.len;
+        end = offset + (try disassembleInstruction(&decoder, offset, null, null)).size;
     }
     return reachable;
+}
+
+fn frequenciesOfLength(alloc: std.mem.Allocator, bytecode: Bytecode, reachable: Reachable, length: usize) ![]Frequency {
+    const decoder = disassemblyContext(bytecode);
+    var freqs = std.HashMap(
+        Idiom,
+        u32,
+        IdiomCtx,
+        std.hash_map.default_max_load_percentage,
+    ).initContext(alloc, .{ .code = bytecode.code });
+    defer freqs.deinit();
+
+    var it = reachable.starts.iterator(.{});
+    while (it.next()) |start| {
+        var end = start;
+        for (0..length) |index| {
+            if (end >= bytecode.code.len or !reachable.starts.isSet(end)) break;
+            if (index != 0 and reachable.block_starts.isSet(end)) break;
+            const info = try disassembleInstruction(&decoder, end, null, null);
+            end += info.size;
+            if (index + 1 == length) {
+                const entry = try freqs.getOrPut(.{ .offset = @intCast(start), .len = @intCast(end - start) });
+                if (!entry.found_existing) entry.value_ptr.* = 0;
+                entry.value_ptr.* += 1;
+            }
+            if (!info.continues or info.returns_after) break;
+        }
+    }
+    const rows = try alloc.alloc(Frequency, freqs.count());
+    var entries = freqs.iterator();
+    for (rows) |*row| {
+        const entry = entries.next().?;
+        row.* = .{ .idiom = entry.key_ptr.*, .count = entry.value_ptr.* };
+    }
+    return rows;
 }
 
 fn countFrequencies(alloc: std.mem.Allocator, bytecode: Bytecode, reachable: Reachable, up_to: usize) !std.ArrayList(Frequency) {
@@ -436,41 +220,15 @@ fn countFrequencies(alloc: std.mem.Allocator, bytecode: Bytecode, reachable: Rea
     const max_length = @min(up_to, reachable.starts.count());
 
     for (0..max_length) |length_index| {
-        var freqs = std.HashMap(
-            Idiom,
-            u32,
-            IdiomCtx,
-            std.hash_map.default_max_load_percentage,
-        ).initContext(
-            alloc,
-            .{ .code = bytecode.code },
-        );
-        defer freqs.deinit();
-
-        var it = reachable.starts.iterator(.{});
-        while (it.next()) |start| {
-            var end = start;
-            for (0..length_index + 1) |index| {
-                if (end >= bytecode.code.len or !reachable.starts.isSet(end)) break;
-                if (index != 0 and reachable.block_starts.isSet(end)) break;
-                const instruction = try readInstruction(bytecode.code, end);
-                const flow = instruction.flowInfo();
-                if (!flow.countable) break;
-                end += instruction.bytes.len;
-                if (index == length_index) {
-                    const entry = try freqs.getOrPut(.{ .offset = @intCast(start), .len = @intCast(end - start) });
-                    if (!entry.found_existing) entry.value_ptr.* = 0;
-                    entry.value_ptr.* += 1;
-                }
-                if (!flow.continues or flow.returns_after) break;
-            }
+        const rows = try frequenciesOfLength(alloc, bytecode, reachable, length_index + 1);
+        if (rows.len == 0) break;
+        if (length_index == 0) {
+            result = .fromOwnedSlice(rows);
+            continue;
         }
-        if (freqs.count() == 0) break;
-        try result.ensureTotalCapacityPrecise(alloc, result.items.len + freqs.count());
-        var entries = freqs.iterator();
-        while (entries.next()) |entry| {
-            result.appendAssumeCapacity(.{ .idiom = entry.key_ptr.*, .count = entry.value_ptr.* });
-        }
+        defer alloc.free(rows);
+        try result.ensureTotalCapacityPrecise(alloc, result.items.len + rows.len);
+        result.appendSliceAssumeCapacity(rows);
     }
     return result;
 }
@@ -485,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
     var up_to: usize = 2;
     if (args.next()) |up| {
         up_to = try std.fmt.parseInt(usize, up, 10);
-        assert(up_to >= 1);
+        if (up_to == 0 or args.next() != null) return error.InvalidCommandLineArguments;
     }
     const file = try std.Io.Dir.cwd().openFile(init.io, filename, .{});
     defer file.close(init.io);
@@ -497,7 +255,7 @@ pub fn main(init: std.process.Init) !void {
     var reader = file.readerStreaming(init.io, &.{});
     var read_offset: usize = 0;
     while (read_offset < bytes.len) {
-        const end = @min(read_offset + 16 * 1024 * 1024, bytes.len);
+        const end = read_offset + @min(bytes.len - read_offset, 16 * 1024 * 1024);
         try reader.interface.readSliceAll(bytes[read_offset..end]);
         read_offset = end;
     }
@@ -507,16 +265,26 @@ pub fn main(init: std.process.Init) !void {
     var freqs = try countFrequencies(alloc, bytecode, reachable, up_to);
     defer freqs.deinit(alloc);
     std.mem.sort(Frequency, freqs.items, bytecode.code, Frequency.lessThan);
-    var text: std.Io.Writer.Allocating = .init(alloc);
-    defer text.deinit();
+    const decoder = disassemblyContext(bytecode);
+    const output = if (@typeInfo(@TypeOf(c.stderr)) == .@"fn") c.stderr() else c.stderr;
     for (freqs.items) |entry| {
-        text.clearRetainingCapacity();
+        var written: usize = 0;
         var offset: usize = entry.idiom.offset;
         const end = offset + entry.idiom.len;
         while (offset < end) {
-            if (offset != entry.idiom.offset) try text.writer.writeAll("; ");
-            offset += try formatInstruction(&text.writer, bytecode, offset);
+            if (offset != entry.idiom.offset) {
+                if (c.fputs("; ", output) < 0) return error.WriteFailed;
+                written += 2;
+            }
+            var instruction_written: usize = 0;
+            const info = try disassembleInstruction(&decoder, offset, output, &instruction_written);
+            written += instruction_written;
+            offset += info.size;
         }
-        std.debug.print("{s: <50} {d: >5} times\n", .{ text.written(), entry.count });
+        const padding: c_int = @intCast(50 - @min(written, 50));
+        if (c.fprintf(output, "%*s %5u times\n", padding, @as([*c]const u8, ""), @as(c_uint, entry.count)) < 0) {
+            return error.WriteFailed;
+        }
     }
+    if (c.fflush(output) != 0) return error.WriteFailed;
 }
